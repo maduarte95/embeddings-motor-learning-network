@@ -8,3 +8,5 @@ __pycache__/
 **/bertopic_model
 
 backups/
+
+.vscode/
