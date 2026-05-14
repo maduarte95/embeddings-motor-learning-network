@@ -10,3 +10,7 @@ __pycache__/
 backups/
 
 .vscode/
+
+# Claude Code Files
+docs/
+CLAUDE.md
