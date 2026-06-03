@@ -1,5 +1,5 @@
 """
-Citation-space nearest neighbours.
+Citation-space nearest neighbors.
 
 Each "similarity method" maps a paper to its top-k most related papers via
 some citation-graph-derived proximity. Currently supported:
@@ -22,12 +22,12 @@ Adamic-Adar, Katz):
         # ... return similarity with zero diagonal
     SIMILARITY_FUNCTIONS["my_measure"] = my_measure
 
-For a method whose natural output is a neighbour list (e.g. direct edges,
+For a method whose natural output is a neighbor list (e.g. direct edges,
 shortest-path k-NN):
 
-    def my_neighbours(G: nx.DiGraph, k: int) -> dict[str, list[str]]:
+    def my_neighbors(G: nx.DiGraph, k: int) -> dict[str, list[str]]:
         # ...
-    NEIGHBOR_FUNCTIONS["my_neighbours"] = my_neighbours
+    NEIGHBOR_FUNCTIONS["my_neighbors"] = my_neighbors
 
 The dispatcher `nearest_neighbors(G, method, k)` resolves either kind.
 """
@@ -111,7 +111,7 @@ def top_k_from_sparse(
 ) -> dict[str, list[str]]:
     """For each row, return up to k column indices with the largest values.
 
-    Rows with fewer than k non-zero entries return however many neighbours
+    Rows with fewer than k non-zero entries return however many neighbors
     exist; rows with no non-zero entries return an empty list.
     """
     S = S.tocsr()
@@ -149,7 +149,7 @@ def nearest_neighbors(
     method: str = "bibliographic_coupling",
     k: int = 10,
 ) -> dict[str, list[str]]:
-    """Top-k citation-space neighbours per node under the chosen similarity.
+    """Top-k citation-space neighbors per node under the chosen similarity.
 
     Parameters
     ----------
@@ -158,7 +158,7 @@ def nearest_neighbors(
     method
         Name registered in SIMILARITY_FUNCTIONS or NEIGHBOR_FUNCTIONS.
     k
-        Number of neighbours per node.
+        Number of neighbors per node.
     """
     if method in SIMILARITY_FUNCTIONS:
         A, nodes = build_adjacency(G)

@@ -1,16 +1,16 @@
 """
-Jaccard overlap between two nearest-neighbour dicts.
+Jaccard overlap between two nearest-neighbor dicts.
 
 Conventions
 -----------
-- An NN dict has the form ``{node_id: [neighbour_ids]}`` with the source node
+- An NN dict has the form ``{node_id: [neighbor_ids]}`` with the source node
   excluded from its own list.
 - Per-paper Jaccard counts only papers with full-length lists (len == k) on
   both sides; papers excluded are returned separately for accounting.
 - The null baseline is a label permutation: it randomly reassigns one
   dict's NN lists to papers, preserving the marginal list-size
-  distribution and the pool of neighbour lists, but breaking the link
-  between a source paper and its own neighbours. It measures how far
+  distribution and the pool of neighbor lists, but breaking the link
+  between a source paper and its own neighbors. It measures how far
   the observed Jaccard sits from chance pairing.
 """
 
@@ -31,7 +31,7 @@ def per_paper_jaccard(
     Parameters
     ----------
     nn_a, nn_b
-        Neighbour-list dicts. Only papers in ``nn_a.keys() & nn_b.keys()``
+        neighbor-list dicts. Only papers in ``nn_a.keys() & nn_b.keys()``
         are considered.
     k
         Expected list length. Used by ``strict`` to decide inclusion.

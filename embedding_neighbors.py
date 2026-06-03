@@ -1,22 +1,17 @@
 """
-Embedding-space nearest neighbours.
+Embedding-space nearest neighbors.
 
 Given a (n, d) array of paper embeddings and a parallel list of node ids,
-return the top-k cosine-nearest neighbours for each paper.
+return the top-k cosine-nearest neighbors for each paper.
 
 Papers with zero-norm embeddings (e.g. no abstract → zero vector) are
-excluded from *both* the query set (they receive an empty neighbour list)
-and the candidate pool (they cannot appear as a neighbour). This keeps the
-Jaccard-overlap population well-defined when paired with citation-space
-neighbours that may also exclude certain papers.
+excluded from *both* the query set (they receive an empty neighbor list)
+and the candidate pool (they cannot appear as a neighbor).
 
 Adding new metrics
 ------------------
 
-If we later want a different distance (e.g. Euclidean for a non-cosine
-embedding space), add a sibling function `euclidean_nearest_neighbors`
-rather than overloading this one — the cosine assumption is baked into
-the L2-normalise-then-dot-product implementation here.
+If we later want a different distance (e.g. Euclidean), add another function `euclidean_nearest_neighbors`.
 """
 
 from __future__ import annotations
@@ -29,7 +24,7 @@ def cosine_nearest_neighbors(
     node_ids: list[str],
     k: int = 10,
 ) -> dict[str, list[str]]:
-    """Top-k cosine-nearest neighbours per row.
+    """Top-k cosine-nearest neighbors per row.
 
     Parameters
     ----------
@@ -38,14 +33,14 @@ def cosine_nearest_neighbors(
     node_ids
         Length-n list mapping row index to node id.
     k
-        Number of neighbours per paper.
+        Number of neighbors per paper.
 
     Returns
     -------
     dict[node_id, list[node_id]]
-        Neighbour ids ordered by descending cosine similarity. Papers with
+        neighbor ids ordered by descending cosine similarity. Papers with
         zero-norm embeddings return an empty list and are also excluded
-        from every other paper's neighbour set.
+        from every other paper's neighbor set.
     """
     if len(node_ids) != embeddings.shape[0]:
         raise ValueError(
