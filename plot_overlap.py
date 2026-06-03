@@ -13,6 +13,7 @@ Error bars are 1 SEM (= std / sqrt(n)).
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -23,6 +24,7 @@ import pandas as pd
 RESULTS_DIR = Path("data/overlap_results")
 FIG_DIR = RESULTS_DIR / "figures"
 TOPIC_WORDS = Path("data/topic_words_new.csv")
+TFIDF_DIR = Path("tf_idf_results")
 
 METHODS = ["bibliographic_coupling", "co_citation", "combined"]
 METHOD_COLORS = {
@@ -42,6 +44,30 @@ def _topic_label_lookup(path: Path = TOPIC_WORDS) -> dict[int, str]:
     for _, row in tw.iterrows():
         words = str(row["words"]).split(" | ")[:3]
         out[int(row["topic_id"])] = ", ".join(words)
+    return out
+
+
+def _community_label_lookup(tfidf_dir: Path = TFIDF_DIR, top_k: int = 3) -> dict[int, str]:
+    """Map community id -> top-k TF-IDF keywords, from keywords_analysis.py output.
+
+    Reads the per-community ``cluster_<id>_..._tfidf_scores.csv`` files (one row
+    per keyword, sorted by descending TF-IDF). Communities that keywords_analysis
+    did not process (beyond its TOP_N_COMMUNITIES) simply won't appear here, and
+    the plot falls back to a bare ``comm <id>`` label for them.
+    """
+    out: dict[int, str] = {}
+    if not tfidf_dir.exists():
+        return out
+    for path in sorted(tfidf_dir.glob("cluster_*_tfidf_scores.csv")):
+        m = re.match(r"cluster_(\d+)_", path.name)
+        if not m:
+            continue
+        try:
+            kw = pd.read_csv(path)["canonical_keyword"].head(top_k).astype(str).tolist()
+        except (OSError, KeyError, pd.errors.ParserError):
+            continue
+        if kw:
+            out[int(m.group(1))] = ", ".join(kw)
     return out
 
 
@@ -142,7 +168,7 @@ def plot_by_topic(
 def plot_by_community(
     method: str = "combined",
     n_show: int = 15,
-    min_size: int = 20,
+    min_size: int = 30,  # matches keywords_analysis.MIN_COMMUNITY_SIZE so every bar has a label
     results_dir: Path = RESULTS_DIR,
     out_dir: Path = FIG_DIR,
 ) -> Path:
@@ -155,12 +181,17 @@ def plot_by_community(
     bottom = agg.tail(n_show).copy().iloc[::-1].reset_index(drop=True)
     null_mean = _null_mean(method, results_dir)
 
+    labels = _community_label_lookup()
+
     def make_label(c, n: int) -> str:
         # community column may be string-cast floats; coerce to int when possible
         try:
             cid = int(float(c))
         except (ValueError, TypeError):
             cid = c
+        kw = labels.get(cid, "") if isinstance(cid, int) else ""
+        if kw:
+            return f"{cid:>3d} · {kw[:38]} (n={int(n)})"
         return f"comm {cid} (n={int(n)})"
 
     fig, axes = plt.subplots(1, 2, figsize=(11, 6.5))

@@ -21,7 +21,14 @@ SYNONYMS_FILE = DATA_DIR / "keyword_synonyms_0.99_with_transitivity.json"
 GRAPHML_FILE = DATA_DIR / "citation_network_with_topics_new.graphml"
 PARQUET_FILE = GRAPHML_FILE.with_suffix(".parquet")
 COMMUNITY_ATTR = 'cluster'
-TOP_N_COMMUNITIES = 30
+# TF-IDF is computed over every community with at least MIN_COMMUNITY_SIZE papers.
+# Smaller communities give unreliable TF-IDF (and tiny all-keyword-less ones would
+# inject an empty document), so they are excluded and fall back to a bare label.
+MIN_COMMUNITY_SIZE = 30
+# DISPLAY_TOP_N only limits which communities get a histogram PNG and appear in the
+# combined top-3 plot; per-community keyword CSVs and community_names_auto.json are
+# written for every community that passes MIN_COMMUNITY_SIZE.
+DISPLAY_TOP_N = 30
 
 NORM: Final = 'l2'
 IDF_BIAS: Final = 0.0
@@ -30,20 +37,16 @@ citation_network_df = pd.read_parquet(PARQUET_FILE)
 TFIDF_OUTPUT_DIR: Final = Path().cwd() / "tf_idf_results"
 TFIDF_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# Keep only the TOP_N_CLUSTERS largest clusters by number of papers
-if COMMUNITY_ATTR in citation_network_df.columns:
-    cluster_sizes = citation_network_df[COMMUNITY_ATTR].dropna().value_counts()
-    top_clusters = cluster_sizes.head(TOP_N_COMMUNITIES).index.tolist()
-else:
-    top_clusters = list(range(TOP_N_COMMUNITIES))
-
 PALETTE_20 = [
     '#e6194B', '#3cb44b', '#4363d8', '#f58231', '#911eb4',
     '#42d4f4', '#f032e6', '#bfef45', '#fabed4', '#469990',
     '#dcbeff', '#9A6324', '#fffac8', '#800000', '#aaffc3',
     '#808000', '#ffd8b1', '#000075', '#a9a9a9', '#000000',
 ]
-MODULARITY_META = {f'{i}': {"label": f"Community {i}", "color": PALETTE_20[i % 20]} for i in range(TOP_N_COMMUNITIES)}
+# Display metadata (label + color) for the DISPLAY_TOP_N largest communities. The
+# `cluster` ids are size-sorted, so ids 0..DISPLAY_TOP_N-1 are the largest communities;
+# membership in this dict therefore also tests "is this a display community".
+MODULARITY_META = {f'{i}': {"label": f"Community {i}", "color": PALETTE_20[i % 20]} for i in range(DISPLAY_TOP_N)}
 
 
 def correct_tfidf(X: scipy.sparse.csr_matrix, vectorizer: TfidfVectorizer, norm: str = None):
@@ -140,7 +143,11 @@ def calculate_canonical_tfidf(citation_network_df: pd.DataFrame, synonym_dict_pa
     # 1. Filtering
     df = citation_network_df.copy()
     df = df.drop(df[df['keywords'].isin(["Unknown keywords"])].index)
-    df = df[df[COMMUNITY_ATTR].isin(MODULARITY_META)]
+    # Keep only communities with at least MIN_COMMUNITY_SIZE papers (size measured on
+    # the full community, before keyword filtering).
+    community_sizes = citation_network_df[COMMUNITY_ATTR].value_counts()
+    keep = community_sizes[community_sizes >= MIN_COMMUNITY_SIZE].index
+    df = df[df[COMMUNITY_ATTR].isin(keep)]
     df = df.dropna().reset_index(drop=True)
 
     # 2. Load and Prepare Synonym Map
@@ -241,6 +248,20 @@ def calculate_canonical_tfidf(citation_network_df: pd.DataFrame, synonym_dict_pa
     return X, vectorizer, df
 
 
+def clean_label(keyword: str) -> str:
+    """Title-case a keyword into a display label, fixing possessive artifacts.
+
+    Source keywords sometimes carry a stray space before an apostrophe
+    (e.g. "parkinson 's disease"), and str.title() capitalizes the letter
+    after an apostrophe ("Parkinson'S"). This collapses the space and
+    lowercases the possessive 's so the label reads "Parkinson's Disease".
+    """
+    label = re.sub(r"\s+'", "'", keyword.strip())        # "parkinson 's" -> "parkinson's"
+    label = label.title()                                 # -> "Parkinson'S Disease"
+    label = re.sub(r"'(\w)", lambda m: "'" + m.group(1).lower(), label)  # "'S" -> "'s"
+    return label
+
+
 def sanitize_filename(name):
     """Sanitizes a string for use as a filename."""
     name = str(name).replace('\n', ' ')
@@ -256,6 +277,8 @@ def _aggregate_top_scores(X, vectorizer, cluster_ids, MODULARITY_META, top_n=3):
     combined_scores = []
 
     for i, cluster_id in enumerate(cluster_ids):
+        if cluster_id not in MODULARITY_META:  # combined plot shows the display set only
+            continue
         meta = MODULARITY_META.get(cluster_id, {})
         display_label = meta.get('label', f"Cluster {cluster_id}")
         plot_color = meta.get('color', '#1f77b4')
@@ -297,6 +320,7 @@ def save_results(X, vectorizer, df, MODULARITY_META, top_n=20):
     else:
         cluster_ids = df_cluster_ids
 
+    n_csv = 0
     for i in range(X.shape[0]):
         cluster_id = cluster_ids[i]
 
@@ -317,6 +341,12 @@ def save_results(X, vectorizer, df, MODULARITY_META, top_n=20):
         })
         df_output["canonical_keyword"] = df_output["canonical_keyword"].str.title()
         df_output.to_csv(csv_path, index=False)
+        n_csv += 1
+
+        # Per-cluster histograms (and verbose logging) only for the display set; the
+        # CSV above is written for every community so any community can be labelled.
+        if cluster_id not in MODULARITY_META:
+            continue
         print(f"Saved TF-IDF scores CSV for {display_label} to: {csv_path.name}")
 
         top = df_output.head(top_n)
@@ -343,7 +373,51 @@ def save_results(X, vectorizer, df, MODULARITY_META, top_n=20):
 
         print(f"Saved TF-IDF histogram for {display_label} to: {png_path.name}")
 
+    print(f"\nWrote {n_csv} per-community keyword CSVs "
+          f"(histograms for the top {len(MODULARITY_META)}).")
     return _aggregate_top_scores(X, vectorizer, cluster_ids, MODULARITY_META, top_n=3)
+
+
+def build_community_names(X, vectorizer, df, out_path):
+    """
+    Write an {cluster_id: label} JSON using each cluster's top-scoring canonical
+    keyword, matching the shape of data/community_names.json that build_web_data.py
+    consumes (string cluster id -> string label).
+
+    Writes to a separate *_auto.json file; it does NOT overwrite the manual labels,
+    so the two can be diffed before promoting any auto labels.
+    """
+    feature_names = vectorizer.get_feature_names_out()
+
+    # Same cluster-id derivation as save_results, so X rows stay aligned.
+    df_cluster_ids = sorted(df[COMMUNITY_ATTR].unique())
+    if len(df_cluster_ids) != X.shape[0]:
+        print(f"Warning: Matrix rows ({X.shape[0]}) do not reliably match unique cluster IDs "
+              f"({len(df_cluster_ids)}). Falling back to sequential numbering.")
+        cluster_ids = list(range(X.shape[0]))
+    else:
+        cluster_ids = df_cluster_ids
+
+    names = {}
+    for i, cluster_id in enumerate(cluster_ids):
+        cluster_vector = X[i].toarray().flatten()
+        scores = pd.Series(cluster_vector, index=feature_names)
+        scores = scores[scores > 0].sort_values(ascending=False)
+        if scores.empty:
+            print(f"Warning: cluster {cluster_id} has no positive TF-IDF keywords; skipping label.")
+            continue
+        names[str(cluster_id)] = clean_label(scores.index[0])
+
+    def _sort_key(item):
+        key = item[0]
+        return (0, int(key)) if key.lstrip('-').isdigit() else (1, key)
+
+    names = dict(sorted(names.items(), key=_sort_key))
+
+    with open(out_path, 'w', encoding='utf-8') as f:
+        json.dump(names, f, indent=4, ensure_ascii=False)
+    print(f"\nSaved auto community names ({len(names)} clusters) to: {out_path}")
+    return names
 
 
 def plot_top_three_scores_combined(combined_scores_data, MODULARITY_META):
@@ -402,5 +476,10 @@ X_matrix, vectorizer_model, dataframe = calculate_canonical_tfidf(citation_netwo
 top_three_scores = save_results(X_matrix, vectorizer_model, dataframe, MODULARITY_META)
 
 plot_top_three_scores_combined(top_three_scores, MODULARITY_META)
+
+build_community_names(
+    X_matrix, vectorizer_model, dataframe,
+    TFIDF_OUTPUT_DIR / "community_names_auto.json",
+)
 
 print("Script execution successful for cluster")

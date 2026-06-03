@@ -32,7 +32,7 @@ DOC_TOPICS = DATA_DIR / "document_topics_new.csv"
 
 K = 10
 CITATION_METHODS = ["bibliographic_coupling", "co_citation", "combined"]
-COMMUNITY_ATTR = "cpm_communities_at_res=0.005"
+COMMUNITY_ATTR = "cluster"
 NULL_RUNS = 100
 
 
