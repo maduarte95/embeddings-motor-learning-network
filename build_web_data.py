@@ -13,6 +13,7 @@ Outputs (relative to project root):
     web/data/abstracts.json   - {node_id: abstract}, lazy-loaded by frontend
 """
 
+import colorsys
 import json
 import os
 import re
@@ -108,6 +109,22 @@ def _hex_color(r, g, b):
         return "#cccccc"
 
 
+def _make_palette(n):
+    """Generate n visually-separated hex colors via golden-angle HSV hues.
+
+    Evenly-spaced hues would give consecutively-numbered communities near-identical
+    colors (and `cluster` ids are size-sorted, so the largest communities are
+    consecutive). The golden-angle increment spreads consecutive ids far apart in
+    hue, keeping neighbouring communities distinguishable for as long as possible.
+    """
+    golden = 0.61803398875
+    palette = []
+    for i in range(max(n, 1)):
+        r, g, b = colorsys.hsv_to_rgb((i * golden) % 1.0, 0.70, 0.95)
+        palette.append("#{:02x}{:02x}{:02x}".format(int(r * 255), int(g * 255), int(b * 255)))
+    return palette
+
+
 # ── Build node payload ──────────────────────────────────────────────────────
 
 def build_nodes(raw_nodes, bridge_ids, names_json):
@@ -115,9 +132,14 @@ def build_nodes(raw_nodes, bridge_ids, names_json):
     abstracts = {}
     with open(names_json, 'r', encoding='utf-8') as f:
         clusters = {int(k): v for k, v in json.load(f).items()}
+    # Color every named community from a generated palette rather than the graphml
+    # r/g/b: Gephi only colored the top 20 communities and baked the rest grey, so
+    # named communities 20+ would otherwise render grey. Unnamed communities stay grey.
+    palette = _make_palette(len(clusters))
+    cluster_color = {cid: palette[i] for i, cid in enumerate(sorted(clusters))}
     for nid, a in raw_nodes:
         cluster = _to_int(a.get(COMMUNITY_ATTR), -1)
-        color = _hex_color(a.get('r'), a.get('g'), a.get('b')) if cluster in clusters.keys() else "#c0c0c0"
+        color = cluster_color.get(cluster, "#c0c0c0")
         if a.get('title') == 'Teaching the simple suture to medical students for long-term retention of skill':
             pass
         rec = {
