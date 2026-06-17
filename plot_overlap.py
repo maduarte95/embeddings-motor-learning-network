@@ -20,10 +20,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from embedding_loaders import DEFAULT_EMBEDDING
+from topic_store import topic_words_path
+
 
 RESULTS_DIR = Path("data/overlap_results")
 FIG_DIR = RESULTS_DIR / "figures"
-TOPIC_WORDS = Path("data/topic_words_new.csv")
+# Topic labels for the default embedding model (see topic_store).
+TOPIC_WORDS = topic_words_path(DEFAULT_EMBEDDING)
 TFIDF_DIR = Path("tf_idf_results")
 
 METHODS = ["bibliographic_coupling", "co_citation", "combined"]
@@ -118,11 +122,17 @@ def plot_headline(results_dir: Path = RESULTS_DIR, out_dir: Path = FIG_DIR) -> P
 def plot_by_topic(
     method: str = "combined",
     n_show: int = 15,
-    min_size: int = 10,
+    min_size: int = 30,
     results_dir: Path = RESULTS_DIR,
     out_dir: Path = FIG_DIR,
+    embedding: str = DEFAULT_EMBEDDING,
 ) -> Path:
-    """Top-N and bottom-N topics by mean Jaccard, side-by-side."""
+    """Top-N and bottom-N topics by mean Jaccard, side-by-side.
+
+    ``embedding`` selects which model's topic-word labels to display. Note the
+    overlap *results* (results_dir) are not keyed by model — they reflect the
+    most recent run_overlap run — so pass the embedding that produced them.
+    """
     agg = pd.read_csv(results_dir / f"{method}_by_topic.csv")
     agg = agg[(agg["topic"] >= 0) & (agg["n"] >= min_size)].copy()
     agg = agg.sort_values("mean", ascending=False).reset_index(drop=True)
@@ -130,7 +140,7 @@ def plot_by_topic(
     top = agg.head(n_show).copy()
     bottom = agg.tail(n_show).copy().iloc[::-1].reset_index(drop=True)  # worst on top
 
-    labels = _topic_label_lookup()
+    labels = _topic_label_lookup(topic_words_path(embedding))
     null_mean = _null_mean(method, results_dir)
 
     def make_label(t: int, n: int) -> str:
@@ -224,9 +234,20 @@ def plot_by_community(
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--embedding", default=DEFAULT_EMBEDDING,
+        help=f"Embedding model key for topic labels (default: {DEFAULT_EMBEDDING}). "
+             "Should match the model used for the latest run_overlap, since the "
+             "overlap results themselves are not keyed by model.",
+    )
+    args = parser.parse_args()
+
     FIG_DIR.mkdir(parents=True, exist_ok=True)
     p1 = plot_headline()
-    p2 = plot_by_topic()
+    p2 = plot_by_topic(embedding=args.embedding)
     p3 = plot_by_community()
     for p in (p1, p2, p3):
         print(f"Saved {p}")

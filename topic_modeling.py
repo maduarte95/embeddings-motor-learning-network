@@ -1,6 +1,14 @@
 """
 Topic Modeling with BERTopic and Specter2
 ==========================================
+
+DEPRECATED — use ``topic_modeling_new.py`` instead.
+This script is kept for reference only. The active pipeline lives in
+``topic_modeling_new.py`` (graph-fingerprint caching, embedding/topic-model
+caches, and SPECTER2 embeddings obtained via ``embedding_loaders.embed_specter2``).
+New work (embedding swap tests, topic-quality metrics) builds on that script and
+on ``embedding_loaders.py``; this file is no longer maintained.
+
 Loads the citation network graph, extracts paper titles and abstracts,
 computes Specter2 embeddings, applies BERTopic to discover topics,
 and adds the topic assignments as a new node attribute.

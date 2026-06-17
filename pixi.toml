@@ -11,6 +11,7 @@ version = "0.1.0"
 python = ">=3.14.4,<3.15"
 ipykernel = ">=7.2.0,<8"
 pip = ">=26.0.1,<27"
+openai = ">=2.42.0,<3"
 
 [pypi-dependencies]
 python-dotenv = "*"

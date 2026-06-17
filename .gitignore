@@ -11,6 +11,11 @@ backups/
 
 .vscode/
 
+.env
+
+# embeddings
+data/embeddings/gemini.npz
+
 # Claude Code Files
 docs/
 CLAUDE.md

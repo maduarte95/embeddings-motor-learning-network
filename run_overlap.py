@@ -20,15 +20,16 @@ import numpy as np
 import pandas as pd
 
 from citation_neighbors import nearest_neighbors as citation_nn
+from embedding_loaders import DEFAULT_EMBEDDING
 from embedding_neighbors import cosine_nearest_neighbors
+from embedding_store import load_embeddings
+from topic_store import load_doc_topics
 from jaccard_overlap import aggregate_jaccard, per_paper_jaccard, shuffle_null
 
 
 DATA_DIR = Path("data")
 OUT_DIR = DATA_DIR / "overlap_results"
 GRAPHML = DATA_DIR / "citation_network_with_topics_new.graphml"
-EMBEDDINGS = DATA_DIR / "embeddings_cache.npz"
-DOC_TOPICS = DATA_DIR / "document_topics_new.csv"
 
 K = 10
 CITATION_METHODS = ["bibliographic_coupling", "co_citation", "combined"]
@@ -36,20 +37,22 @@ COMMUNITY_ATTR = "cluster"
 NULL_RUNS = 100
 
 
-def load_data() -> tuple[nx.DiGraph, np.ndarray, list[str], dict[str, int], dict[str, str]]:
+def load_data(
+    embedding_key: str = DEFAULT_EMBEDDING,
+) -> tuple[nx.DiGraph, np.ndarray, list[str], dict[str, int], dict[str, str]]:
     print(f"Loading graph from {GRAPHML}...")
     G = nx.read_graphml(GRAPHML)
     print(f"  {G.number_of_nodes():,} nodes, {G.number_of_edges():,} edges")
 
-    print(f"Loading embeddings from {EMBEDDINGS}...")
-    emb = np.load(EMBEDDINGS)["valid_embeddings"]
-    print(f"  shape={emb.shape}")
+    print(f"Loading embeddings (model: {embedding_key})...")
+    # node_ids travel with the vectors — alignment is by id, not row order.
+    emb, node_ids, emb_meta = load_embeddings(embedding_key)
+    print(f"  shape={emb.shape}  model={emb_meta.get('model')}")
 
-    print(f"Loading document-topic map from {DOC_TOPICS}...")
-    df = pd.read_csv(DOC_TOPICS)
-    node_ids = df["node_id"].tolist()
-    topic_by_node = dict(zip(df["node_id"], df["topic"]))
-    print(f"  {len(node_ids):,} rows")
+    print(f"Loading document-topic map (model: {embedding_key})...")
+    df = load_doc_topics(embedding_key)
+    topic_by_node = dict(zip(df["node_id"].astype(str), df["topic"]))
+    print(f"  {len(df):,} rows")
 
     community_by_node: dict[str, str] = {}
     for n, attrs in G.nodes(data=True):
@@ -60,16 +63,20 @@ def load_data() -> tuple[nx.DiGraph, np.ndarray, list[str], dict[str, int], dict
           f"{len(community_by_node):,} nodes assigned, "
           f"{len(set(community_by_node.values()))} distinct communities")
 
-    if emb.shape[0] != len(node_ids):
-        raise RuntimeError(
-            f"Embedding rows ({emb.shape[0]}) != node_ids length ({len(node_ids)}). "
-            "The embeddings cache must be aligned with document_topics_new.csv row order."
-        )
     return G, emb, node_ids, topic_by_node, community_by_node
 
 
 def main() -> None:
-    G, emb, node_ids, topic_by_node, community_by_node = load_data()
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--embedding", default=DEFAULT_EMBEDDING,
+        help=f"Embedding model key (default: {DEFAULT_EMBEDDING}).",
+    )
+    args = parser.parse_args()
+
+    G, emb, node_ids, topic_by_node, community_by_node = load_data(args.embedding)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     print(f"\nComputing embedding NN (k={K})...")

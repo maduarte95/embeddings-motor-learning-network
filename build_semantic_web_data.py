@@ -4,8 +4,9 @@ Build static assets for the *semantic* web viz (~/motor-semantic-viz).
 Sibling of ``build_web_data.py``. Same output schema and the same sigma.js
 frontend, with two differences:
 
-  1. Node x/y come from a 2D UMAP projection of the SPECTER2 embeddings
-     (``data/embeddings_cache.npz``) instead of the Gephi citation layout.
+  1. Node x/y come from a 2D UMAP projection of the embeddings
+     (``data/embeddings/{key}.npz`` via embedding_store; default SPECTER2)
+     instead of the Gephi citation layout.
   2. Two coexisting groupings are emitted, each with its own colors,
      centroids and legend payload:
         - topics.json      BERTopic topics      (default color)
@@ -42,22 +43,29 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from embedding_loaders import DEFAULT_EMBEDDING
+from embedding_store import load_embeddings
+from topic_store import topic_words_path, load_doc_topics
+
 # ── Paths / config ──────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parent
 DATA_DIR = PROJECT_ROOT / "data"
 
 GRAPHML_FILE = DATA_DIR / "citation_network_with_topics_new.graphml"
-EMBED_CACHE = DATA_DIR / "embeddings_cache.npz"
-DOC_TOPICS = DATA_DIR / "document_topics_new.csv"
-TOPIC_WORDS = DATA_DIR / "topic_words_new.csv"
 COMMUNITY_NAMES_JSON = DATA_DIR / "community_names.json"
-UMAP_CACHE = DATA_DIR / "umap_2d_cache.npz"
 
 WEB_DIR = PROJECT_ROOT / "web_semantic"
 WEB_DATA_DIR = WEB_DIR / "data"
 
+
+def umap_cache_path(key):
+    """2D-UMAP cache for embedding ``key`` (each model has its own layout)."""
+    return DATA_DIR / f"umap_2d_{key}.npz"
+
+
 COMMUNITY_ATTR = "cluster"   # Leiden community attribute on graphml nodes
-TOPIC_ATTR = "topic"         # BERTopic topic attribute on graphml nodes
+# Per-node BERTopic topic comes from document_topics_{key}.csv (topic_store),
+# not the graphml 'topic' attr, so each embedding key stays self-consistent.
 MIN_GROUP_SIZE = 30          # only name/colour/legend groups at least this big
 TOP_BRIDGE_PAPERS = 50       # how many bridge papers to flag with `bridge: 1`
 BRIDGE_CSV = PROJECT_ROOT / "bridge_papers.csv"  # optional; skipped if absent
@@ -117,26 +125,21 @@ def _embed_fingerprint(emb: np.ndarray) -> str:
     return h.hexdigest()
 
 
-def compute_umap_layout(recompute=False):
+def compute_umap_layout(recompute=False, embedding_key=DEFAULT_EMBEDDING):
     """Return {node_id: (x, y)} from a 2D UMAP of the cached embeddings.
 
-    Row i of ``valid_embeddings`` corresponds to row i of
-    document_topics_new.csv, which gives the node_id (verified 1:1).
+    Embeddings and their node_ids are loaded together from embedding_store, so
+    rows are aligned by id rather than by trusting a separate file's row order.
     """
-    emb = np.load(EMBED_CACHE)["valid_embeddings"].astype(np.float32)
-    doc = pd.read_csv(DOC_TOPICS)
-    node_ids = doc["node_id"].astype(str).tolist()
-    if len(node_ids) != emb.shape[0]:
-        raise ValueError(
-            f"embeddings rows ({emb.shape[0]}) != document_topics rows "
-            f"({len(node_ids)}); cannot align embeddings to node ids."
-        )
+    emb, node_ids, _ = load_embeddings(embedding_key)
+    emb = emb.astype(np.float32)
 
+    umap_cache = umap_cache_path(embedding_key)
     fp = _embed_fingerprint(emb)
-    if not recompute and UMAP_CACHE.exists():
-        cached = np.load(UMAP_CACHE, allow_pickle=True)
+    if not recompute and umap_cache.exists():
+        cached = np.load(umap_cache, allow_pickle=True)
         if str(cached["fingerprint"]) == fp:
-            print(f"  UMAP cache hit — loading {UMAP_CACHE.name}")
+            print(f"  UMAP cache hit — loading {umap_cache.name}")
             coords = cached["coords"]
             ids = cached["node_ids"].astype(str)
             return dict(zip(ids.tolist(), coords))
@@ -160,12 +163,12 @@ def compute_umap_layout(recompute=False):
     coords = coords.astype(np.float32)
 
     np.savez_compressed(
-        UMAP_CACHE,
+        umap_cache,
         coords=coords,
         node_ids=np.array(node_ids, dtype=object),
         fingerprint=fp,
     )
-    print(f"  UMAP saved to {UMAP_CACHE.name}")
+    print(f"  UMAP saved to {umap_cache.name}")
     return dict(zip(node_ids, coords))
 
 
@@ -199,16 +202,17 @@ def parse_graphml():
 
 # ── 3. Colour maps for both groupings ───────────────────────────────────────
 
-def build_color_maps(raw_nodes, community_names):
+def build_color_maps(raw_nodes, community_names, topic_by_node):
     """Return (community_color, topic_color, topic_sizes) dicts.
 
     Communities are coloured from their named set (community_names.json), like
     build_web_data. Topics are coloured for every topic with >= MIN_GROUP_SIZE
-    papers; smaller topics and the -1 outlier bucket stay grey.
+    papers; smaller topics and the -1 outlier bucket stay grey. Per-node topics
+    come from the selected model's document_topics file (topic_by_node).
     """
     topic_sizes = Counter()
-    for _nid, a in raw_nodes:
-        topic_sizes[_to_int(a.get(TOPIC_ATTR), -1)] += 1
+    for nid, _a in raw_nodes:
+        topic_sizes[topic_by_node.get(nid, -1)] += 1
 
     community_ids = sorted(int(k) for k in community_names)
     comm_palette = _make_palette(len(community_ids))
@@ -226,13 +230,14 @@ def build_color_maps(raw_nodes, community_names):
 GREY = "#c0c0c0"
 
 
-def build_nodes(raw_nodes, umap_xy, community_color, topic_color, bridge_ids):
+def build_nodes(raw_nodes, umap_xy, community_color, topic_color, bridge_ids,
+                topic_by_node):
     records = []
     abstracts = {}
     missing_xy = 0
     for nid, a in raw_nodes:
         cluster = _to_int(a.get(COMMUNITY_ATTR), -1)
-        topic = _to_int(a.get(TOPIC_ATTR), -1)
+        topic = topic_by_node.get(nid, -1)
         xy = umap_xy.get(nid)
         if xy is None:
             missing_xy += 1
@@ -302,12 +307,13 @@ def build_communities(node_records, community_names, community_color):
     return out
 
 
-def _topic_names():
-    """{topic_id: 'word1 · word2 · word3'} from topic_words_new.csv."""
+def _topic_names(embedding_key=DEFAULT_EMBEDDING):
+    """{topic_id: 'word1 · word2 · word3'} from the model's topic_words file."""
+    tw_path = topic_words_path(embedding_key)
     try:
-        tw = pd.read_csv(TOPIC_WORDS)
+        tw = pd.read_csv(tw_path)
     except FileNotFoundError:
-        print(f"  WARN: {TOPIC_WORDS.name} not found, topics will be unnamed")
+        print(f"  WARN: {tw_path.name} not found, topics will be unnamed")
         return {}
     names = {}
     for _, row in tw.iterrows():
@@ -373,27 +379,40 @@ def load_bridge_ids(path, top_n):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--recompute", action="store_true", help="Ignore the UMAP cache.")
+    ap.add_argument(
+        "--embedding", default=DEFAULT_EMBEDDING,
+        help=f"Embedding model key (default: {DEFAULT_EMBEDDING}).",
+    )
     args = ap.parse_args()
 
-    WEB_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    # Per-key outputs (model-dependent: layout, topics, community centroids) go
+    # in a subdir; truly shared outputs (citations, abstracts) stay top-level.
+    key_dir = WEB_DATA_DIR / args.embedding
+    key_dir.mkdir(parents=True, exist_ok=True)
 
     print("Computing UMAP layout...")
-    umap_xy = compute_umap_layout(recompute=args.recompute)
+    umap_xy = compute_umap_layout(recompute=args.recompute, embedding_key=args.embedding)
 
     raw_nodes, edges, _ = parse_graphml()
 
     with open(COMMUNITY_NAMES_JSON, encoding="utf-8") as f:
         community_names = json.load(f)
 
-    community_color, topic_color, topic_sizes = build_color_maps(raw_nodes, community_names)
+    # Per-node topic from the selected model's document_topics file.
+    doc = load_doc_topics(args.embedding)
+    topic_by_node = {str(n): _to_int(t, -1) for n, t in zip(doc["node_id"], doc["topic"])}
+
+    community_color, topic_color, topic_sizes = build_color_maps(
+        raw_nodes, community_names, topic_by_node
+    )
     bridge_ids = load_bridge_ids(BRIDGE_CSV, TOP_BRIDGE_PAPERS)
 
     node_records, abstracts = build_nodes(
-        raw_nodes, umap_xy, community_color, topic_color, bridge_ids
+        raw_nodes, umap_xy, community_color, topic_color, bridge_ids, topic_by_node
     )
 
     communities = build_communities(node_records, community_names, community_color)
-    topics = build_topics(node_records, topic_color, _topic_names())
+    topics = build_topics(node_records, topic_color, _topic_names(args.embedding))
 
     years = [r["year"] for r in node_records if r["year"] is not None]
     nodes_payload = {
@@ -406,16 +425,18 @@ def main():
     in_offsets, in_targets = build_csr(len(node_records), edges, "in")
 
     # ── Write outputs ───────────────────────────────────────────────────────
-    def dump(name, obj):
-        p = WEB_DATA_DIR / name
-        with open(p, "w", encoding="utf-8") as f:
+    def dump(path, obj):
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(obj, f, ensure_ascii=False, separators=(",", ":"))
-        return p
+        return path
 
-    nodes_path = dump("nodes.json", nodes_payload)
-    topics_path = dump("topics.json", topics)
-    comm_path = dump("communities.json", communities)
-    abstracts_path = dump("abstracts.json", abstracts)
+    # Per-key (model-dependent): node layout, topic grouping, and community
+    # centroids (centroids live in this model's UMAP space).
+    nodes_path = dump(key_dir / "nodes.json", nodes_payload)
+    topics_path = dump(key_dir / "topics.json", topics)
+    comm_path = dump(key_dir / "communities.json", communities)
+    # Shared (model-independent): citation edges and abstracts.
+    abstracts_path = dump(WEB_DATA_DIR / "abstracts.json", abstracts)
     out_path = WEB_DATA_DIR / "edges_out.bin"
     in_path = WEB_DATA_DIR / "edges_in.bin"
     write_csr(out_path, out_offsets, out_targets)

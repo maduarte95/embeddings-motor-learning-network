@@ -12,8 +12,8 @@ Caching
 Two expensive steps are cached on disk and reused across runs as long as
 the source graph has not changed:
 
-  1. Specter2 embeddings  → DATA_DIR/embeddings_cache.npz
-  2. BERTopic model       → DATA_DIR/bertopic_model/
+  1. Embeddings           → DATA_DIR/embeddings/{key}.npz (via embedding_store)
+  2. BERTopic model       → DATA_DIR/bertopic_model_{key}/ (via topic_store)
 
 A SHA-256 fingerprint is computed from every node's (id, title, abstract)
 triple. If the fingerprint matches the one stored in the cache, the cached
@@ -33,13 +33,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import networkx as nx
 import pandas as pd
 import numpy as np
-from tqdm import tqdm
 import warnings
 warnings.filterwarnings('ignore')
 
-from transformers import AutoTokenizer
-from adapters import AutoAdapterModel
-import torch
+from embedding_loaders import get_loader, DEFAULT_EMBEDDING
+from embedding_store import save_embeddings, load_embeddings, align, path_for
+from topic_store import doc_topics_path, topic_words_path, topic_info_path, model_dir
 from bertopic import BERTopic
 from umap import UMAP
 from hdbscan import HDBSCAN
@@ -51,10 +50,9 @@ GRAPHML_FILE = DATA_DIR / "citation_network_selected.graphml"
 SUFFIX = "_new"
 
 # ── Configuration ──────────────────────────────────────────────────────────
-SPECTER2_MODEL   = "allenai/specter2_base"
+# Embedding model/adapter names live in embedding_loaders; the model is chosen
+# at runtime via --embedding (see embedding_loaders.REGISTRY).
 OUTPUT_GRAPHML   = DATA_DIR / f"citation_network_with_topics{SUFFIX}.graphml"
-EMBED_CACHE      = DATA_DIR / "embeddings_cache.npz"
-TOPIC_MODEL_DIR  = DATA_DIR / f"bertopic_model{SUFFIX}_results"
 FINGERPRINT_FILE = DATA_DIR / "graph_fingerprint.json"
 MIN_TOPIC_SIZE   = 15
 N_NEIGHBORS      = 15
@@ -67,7 +65,15 @@ parser.add_argument(
     "--recompute", action="store_true",
     help="Ignore all caches and recompute everything from scratch.",
 )
+parser.add_argument(
+    "--embedding", default=DEFAULT_EMBEDDING,
+    help=f"Embedding model key (default: {DEFAULT_EMBEDDING}). "
+         "See embedding_loaders.REGISTRY for options.",
+)
 args = parser.parse_args()
+EMBEDDING_KEY = args.embedding
+# Topic artifacts are keyed by the embedding model (see topic_store).
+TOPIC_MODEL_DIR = model_dir(EMBEDDING_KEY)
 
 print("=" * 80)
 print("Topic Modeling with BERTopic and Specter2")
@@ -141,54 +147,29 @@ elif cache_valid:
 else:
     print("\n  Graph fingerprint changed (or no cache found) — will recompute.")
 
-# ── 3. Specter2 Embeddings (cached) ───────────────────────────────────────
-print("\n[3/6] Computing Specter2 embeddings...")
+# ── 3. Embeddings (cached, per model) ─────────────────────────────────────
+print(f"\n[3/6] Computing embeddings (model: {EMBEDDING_KEY})...")
 
-embed_cache_hit = cache_valid and EMBED_CACHE.exists() and not args.recompute
+# node_ids row-aligned with valid_docs (and therefore valid_embeddings)
+valid_node_ids = [node_ids[i] for i in valid_indices]
+embed_cache_hit = cache_valid and path_for(EMBEDDING_KEY).exists() and not args.recompute
 
 if embed_cache_hit:
-    print(f"  Cache hit — loading embeddings from {EMBED_CACHE}")
-    valid_embeddings = np.load(EMBED_CACHE)["valid_embeddings"]
+    print(f"  Cache hit — loading embeddings from {path_for(EMBEDDING_KEY)}")
+    emb_cached, emb_ids, _ = load_embeddings(EMBEDDING_KEY)
+    # Align by node_id (not row order) to the current document set.
+    valid_embeddings = align(emb_cached, emb_ids, valid_node_ids)
     print(f"  Loaded embeddings: {valid_embeddings.shape}")
 else:
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"  Loading model: {SPECTER2_MODEL}  (device: {device})")
-
-    tokenizer = AutoTokenizer.from_pretrained(SPECTER2_MODEL)
-    model     = AutoAdapterModel.from_pretrained(SPECTER2_MODEL)
-    model.load_adapter(
-        "allenai/specter2",
-        source="hf",
-        load_as="specter2",
-        set_active=True,
-    )
-    model = model.to(device)
-    model.eval()
-
-    def embed_batch(texts):
-        inputs = tokenizer(
-            texts, padding=True, truncation=True,
-            max_length=512, return_tensors="pt",
-        ).to(device)
-        with torch.no_grad():
-            outputs = model(**inputs)
-            return outputs.last_hidden_state[:, 0, :].cpu().numpy()
-
-    print(f"  Embedding {len(valid_docs):,} documents in batches of {BATCH_SIZE}...")
-    embeddings_list = []
-    for i in tqdm(range(0, len(valid_docs), BATCH_SIZE), desc="  Embedding"):
-        embeddings_list.append(embed_batch(valid_docs[i:i + BATCH_SIZE]))
-
-    valid_embeddings = np.vstack(embeddings_list)
+    loader, model_name = get_loader(EMBEDDING_KEY)
+    valid_embeddings = loader(valid_docs, batch_size=BATCH_SIZE)
     print(f"  Embedding shape: {valid_embeddings.shape}")
 
-    np.savez_compressed(EMBED_CACHE, valid_embeddings=valid_embeddings)
-    print(f"  Embeddings saved to cache: {EMBED_CACHE}")
-
-    # Free GPU memory — the model is no longer needed past this point
-    del model, tokenizer
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    save_embeddings(
+        EMBEDDING_KEY, valid_embeddings, valid_node_ids,
+        model=model_name, fingerprint=current_fp,
+    )
+    print(f"  Embeddings saved to {path_for(EMBEDDING_KEY)}")
 
 # Reconstruct full array (zeros for nodes without text)
 embeddings = np.zeros((len(documents), valid_embeddings.shape[1]))
@@ -200,14 +181,14 @@ print("\n[4/6] Applying BERTopic clustering...")
 topic_cache_hit = (
     cache_valid
     and TOPIC_MODEL_DIR.exists()
-    and (DATA_DIR / f"document_topics{SUFFIX}.csv").exists()
+    and doc_topics_path(EMBEDDING_KEY).exists()
     and not args.recompute
 )
 
 if topic_cache_hit:
     print(f"  Cache hit — loading BERTopic model from {TOPIC_MODEL_DIR}")
     topic_model = BERTopic.load(str(TOPIC_MODEL_DIR))
-    topics      = pd.read_csv(DATA_DIR / f"document_topics{SUFFIX}")["topic"].to_numpy()
+    topics      = pd.read_csv(doc_topics_path(EMBEDDING_KEY))["topic"].to_numpy()
     topic_info  = topic_model.get_topic_info()
     print(f"  Loaded model with {len(topic_info) - 1} topics")
 else:
@@ -281,15 +262,15 @@ print("  Saved successfully!")
 # ── 7. Save Topic Artefacts ───────────────────────────────────────────────
 print("\n[Bonus] Saving topic information...")
 
-topic_info.to_csv(DATA_DIR / f"topic_info{SUFFIX}.csv", index=False)
-print(f"  Saved topic_info{SUFFIX}.csv")
+topic_info.to_csv(topic_info_path(EMBEDDING_KEY), index=False)
+print(f"  Saved {topic_info_path(EMBEDDING_KEY).name}")
 
 pd.DataFrame({
     'node_id':  node_ids,
     'topic':    topics,
     'document': documents,
-}).to_csv(DATA_DIR / f"document_topics{SUFFIX}.csv", index=False)
-print(f"  Saved document_topics{SUFFIX}.csv")
+}).to_csv(doc_topics_path(EMBEDDING_KEY), index=False)
+print(f"  Saved {doc_topics_path(EMBEDDING_KEY).name}")
 
 valid_topic_ids = topic_info[topic_info['Topic'] != -1]['Topic'].tolist()
 topic_words = []
@@ -302,8 +283,8 @@ for topic_id in valid_topic_ids:
             'scores':   " | ".join(f"{s:.4f}" for _, s in words),
         })
 
-pd.DataFrame(topic_words).to_csv(DATA_DIR / f"topic_words{SUFFIX}.csv", index=False)
-print(f"  Saved topic_words{SUFFIX}.csv")
+pd.DataFrame(topic_words).to_csv(topic_words_path(EMBEDDING_KEY), index=False)
+print(f"  Saved {topic_words_path(EMBEDDING_KEY).name}")
 
 print("\n" + "=" * 80)
 print("Topic modeling complete!")
@@ -312,8 +293,8 @@ print(f"\nSummary:")
 print(f"  - Processed {len(documents):,} papers")
 print(f"  - Found {n_topics} topics")
 print(f"  - Updated graph saved to:          {OUTPUT_GRAPHML}")
-print(f"  - Topic info saved to:             {DATA_DIR / f'topic_info{SUFFIX}.csv'}")
-print(f"  - Document-topic mapping saved to: {DATA_DIR / f'document_topics{SUFFIX}.csv'}")
-print(f"  - Topic words saved to:            {DATA_DIR / f'topic_words{SUFFIX}.csv'}")
-print(f"  - Embedding cache:                 {EMBED_CACHE}")
+print(f"  - Topic info saved to:             {topic_info_path(EMBEDDING_KEY)}")
+print(f"  - Document-topic mapping saved to: {doc_topics_path(EMBEDDING_KEY)}")
+print(f"  - Topic words saved to:            {topic_words_path(EMBEDDING_KEY)}")
+print(f"  - Embedding cache:                 {path_for(EMBEDDING_KEY)}")
 print(f"  - BERTopic model cache:            {TOPIC_MODEL_DIR}")
