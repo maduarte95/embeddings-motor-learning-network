@@ -31,12 +31,13 @@
 
 6. Topic quality is evaluated with `topic_quality.py`: NPMI coherence and topic diversity (higher = better), outlier/coverage %, and an author-overlap-within-topics diagnostic (vs a label-shuffle null). Held under a fixed pipeline, these also compare embedding models (the "swap test"). Coherence is computed directly from document co-occurrence (no gensim dependency).
 
+7. A recommender (`community_recommender.py`) surfaces, within each semantic topic, citation-community pairs that are semantically together but far apart in citation space — same problem space, no citation cross-talk. Targets a topic, paper, or author, with a swappable citation-space connectedness measure (see "How to use").
+
 
 To be implemented:
 - characterization of the embedding space (e.g.: anisotropy, intrinsic dimensionality, hubness, 2D trustworthiness, boostrapped neighborhood stability)
 - support for SentenceTransformers embeddings (e.g. Stella400M/1.5B, F2LLM-4B, Qwen3-Embedding-8B)
 - representation similarity analyses (RSA, Procrustes)
-- Recommendation system for author/topic/paper -> more topic-related but least connected communities 
 
 
 ## How to use
@@ -103,6 +104,56 @@ pixi run python run_topic_sweep.py --embedding gemini
 > UMAP is computed once and cached (`data/umap_5d_<key>.npz`; `--recompute-umap`
 > to rebuild). Expect a minute or two per run depending on the grid size.
 
+### Recommender
+```bash
+# Within each topic, surface citation-community pairs that are semantically
+# together but far apart in citation space. Output:
+# data/recommender_results/recommendations_<embedding>_<method>.csv
+pixi run python community_recommender.py --embedding gemini --method conductance --all
+
+# Single targets (mutually exclusive)
+pixi run python community_recommender.py --embedding gemini --topic 5
+pixi run python community_recommender.py --embedding gemini --paper n123
+pixi run python community_recommender.py --embedding gemini --author "rizzolatti"
+```
+
+| Flag | Values | Default | Meaning |
+|---|---|---|---|
+| `--embedding` | `specter2`, `gemini` | `specter2` | Which topic model is the semantic ground truth |
+| `--method` | `bibliographic_coupling`, `co_citation`, `combined`, `conductance` | `bibliographic_coupling` | Citation-space connectedness measure |
+| `--topic N` / `--paper nID` / `--author "name"` / `--all` | — | — | Target (mutually exclusive) |
+| `--k` | int (`0` = all pairs) | `10` | Bottom-k least-connected pairs |
+| `--min-papers` | int | `10` | Min papers a community needs *in a topic* to qualify |
+
+> ⚠️ **Note:** `conductance` carries a
+> partner-size baseline problem (big, prolific communities rank as "disconnected"
+> regardless), so when comparing embeddings check with the other metrics (e.g. `combined`).
+
+### Recommender explorer (UI)
+```bash
+# Interactive Streamlit app over community_recommender.py: search by topic,
+# paper, or author and browse the least-connected community pairs, then drill
+# into the papers on each side. Embedding / method / k / min-papers are widgets;
+# a sidebar panel explains how each connectedness measure is computed.
+pixi run streamlit run recommender_app.py
+
+# In a browser, navigate to:
+http://localhost:8501/
+```
+
+Search modes (top of the page):
+- **Topic** (dropdown labelled with topic
+keywords)
+- **Paper** (search by title or node id)
+- **Author** (name substring)
+- **All topics** — pools every topic's candidate pairs into one table and ranks them globally (top-N most disconnected across the corpus, with scores always
+**intra-topic**). in every mode (each pair is scored only against its own topic's
+communities);
+
+Community ids are shown with the labels
+from `data/community_names.json`.
+
+
 ### Visualization assets
 ```bash
 # Semantic 2D-UMAP web assets (uses a chosen embedding space)
@@ -133,7 +184,7 @@ picks a `<key>` and loads that subdir plus the shared top-level files.
 
 > ⚠️ **Note:** the shared graphml keeps citations + Leiden cluster (model-independent);
 > its `topic` node attribute reflects only the most recent topic run. In `build_semantic_web_data.py`
-> per-node topic now read from document_topics_{key}.csv (not the graphml topic attr!) so the topic
+> per-node topic read from document_topics_{key}.csv (not the graphml topic attr!) so the stored topic
 > information matches the embeddings. `build_web_data.py` might still use only the last run topics.
 
 ### Interactive inspection
@@ -198,32 +249,27 @@ How much do a paper's **nearest neighbors in embedding space** agree with its
   z-score `(real − null_mean) / null_std` says how far above chance the real
   overlap sits.
 
-Note: SPECTER2 is citation-trained, so high overlap is partly artifactual and
-*expected*. The interesting signal is the opposite — **low-overlap** pairs/topics
-(semantically close but citation-distant) are the recommender's candidates.
+Note: SPECTER2 is citation-trained, so high overlap is expected.
 
 ### Topic quality
 
 *Produced by `topic_quality.py` (metric functions reusable via `evaluate_topics(key)`).*
 
 Whether the discovered topics are good, and (under a fixed pipeline) which
-embedding produces better topics — the "swap test".
+embedding produces better topics. Interpret metrics in conjunction with each other.
 
 - **NPMI coherence** — do a topic's top-10 words actually **co-occur** in the
   abstracts? Normalised pointwise mutual information per word pair, averaged over
-  pairs and topics (Bouma 2009; Lau et al. 2014). Roughly −1…1; **higher = more
+  pairs and topics (Bouma 2009; Lau et al. 2014). **higher = more
   interpretable**. Computed directly from document co-occurrence (no gensim).
 - **Topic diversity** — fraction of **unique words** across all topics' top-10
   (Dieng et al. 2020); **higher = less redundant** topics. Low values flag many
   topics repeating the same generic words.
 - **Outliers / coverage** — share of papers in the `-1` (HDBSCAN noise) bucket;
-  coverage = 1 − that. A guard, not a target: coverage rises automatically as
-  clustering gets coarser, so read it *alongside* coherence, never maximise it.
+  coverage = 1 − outliers.
 - **Author overlap within topics** *(diagnostic)* — mean number of **shared
-  authors per within-topic paper pair**, vs a label-shuffle null (z-score). Tells
-  you how much topics coincide with author communities. **Not a quality target** —
-  a good topic could be a tight lab community *or* a broad cross-lab subfield.
-  Uses exact name matching, so it under-counts spelling variants.
+  authors per within-topic paper pair**, vs a label-shuffle null (z-score) i.e. how much topics coincide with author groups. Should be interpreted as a noisy signal of topic quality (a good semantic topic could have a broad author coverage).
+  Might under-count spelling variants.
 
 ### Topic granularity sweep
 
@@ -231,7 +277,4 @@ embedding produces better topics — the "swap test".
 
 `run_topic_sweep.py` varies HDBSCAN's `min_cluster_size` (topic count is
 emergent, not set directly) with everything upstream fixed, tabulating
-`n_topics`, `coverage`, `npmi`, and `diversity` per setting. Read it as a
-**trade-off, not a single maximum**: coverage rises monotonically as you coarsen,
-while coherence and diversity usually peak in the middle — pick a granularity
-where coherence/diversity are near their peak at acceptable coverage.
+`n_topics`, `coverage`, `npmi`, and `diversity` per setting. Pick a granularity where coherence/diversity are near their peak at acceptable coverage.
