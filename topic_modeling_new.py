@@ -54,7 +54,7 @@ SUFFIX = "_new"
 # at runtime via --embedding (see embedding_loaders.REGISTRY).
 OUTPUT_GRAPHML   = DATA_DIR / f"citation_network_with_topics{SUFFIX}.graphml"
 FINGERPRINT_FILE = DATA_DIR / "graph_fingerprint.json"
-MIN_TOPIC_SIZE   = 15
+MIN_TOPIC_SIZE   = 30 # 15
 N_NEIGHBORS      = 15
 N_COMPONENTS     = 5
 BATCH_SIZE       = 32
